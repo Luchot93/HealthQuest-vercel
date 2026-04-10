@@ -749,12 +749,15 @@ export const App: React.FC = () => {
 
       HARD RULES:
       - ALWAYS include exactly 3 or 4 tasks.
-      - ALWAYS include at least one task from the 'Recovery' category.
-      - NEVER suggest running to Stressed users or if energy is 1-2.
-      - NEVER suggest running if energy is 1-2, regardless of mood.
-      - NEVER suggest running challenges if previous day status is 'None'.
+      - EVERY TASK MUST HAVE A UNIQUE ID - NEVER repeat the same challenge ID twice.
+      - ALWAYS include at least one task from the 'Recovery' category (IDs 36-43).
+      - NEVER suggest running (IDs 1-15) to Stressed users.
+      - NEVER suggest running (IDs 1-15) if energy is 1-2, regardless of mood.
+      - NEVER suggest running (IDs 1-15) if previous day status is 'None'.
+      - For Stressed or Low Energy: Pick from Walking (16-25), Warm-up/Cool-down (26-35), Recovery (36-43), Hydration (44-50) ONLY.
       - Always frame challenges positively.
       - Use the challenge text AS-IS from the bank below - do not modify the X values.
+      - DIVERSIFY: Pick challenges from different categories when possible (e.g., 1 Walking + 1 Recovery + 1 Hydration).
 
       PET DIALOGUE BY MOOD:
       - Energetic: "You've got great energy today. Let's make the most of it together."
@@ -801,7 +804,39 @@ export const App: React.FC = () => {
       const selectedTasks = result.tasks || [];
       setPetSpeech(result.petDialogue || null);
       
-      const newGoals = selectedTasks.map((selection: any, idx: number) => {
+      // Deduplicate tasks by ID (safety net in case AI returns duplicates)
+      const seenIds = new Set<number>();
+      const uniqueTasks = selectedTasks.filter((task: any) => {
+        if (seenIds.has(task.id)) return false;
+        seenIds.add(task.id);
+        return true;
+      });
+
+      // If we have duplicates removed and need more tasks, fill from appropriate categories
+      let finalTasks = uniqueTasks;
+      if (uniqueTasks.length < 3) {
+        const usedIds = new Set(uniqueTasks.map((t: any) => t.id));
+        // For low energy/stressed, only pick from non-running categories
+        const isLowEnergy = userEnergy <= 2 || userMoodSelection === 'Stressed';
+        const availableGoals = enrichedGoalBank.filter(g => {
+          if (usedIds.has(g.id)) return false;
+          if (isLowEnergy && g.category === 'Running') return false;
+          return true;
+        });
+        // Prioritize Recovery, then Walking, then Hydration
+        const priorityOrder = ['Recovery', 'Walking', 'Hydration', 'Cool-down', 'Warm-up'];
+        availableGoals.sort((a, b) => {
+          const aIdx = priorityOrder.indexOf(a.category);
+          const bIdx = priorityOrder.indexOf(b.category);
+          return (aIdx === -1 ? 99 : aIdx) - (bIdx === -1 ? 99 : bIdx);
+        });
+        while (finalTasks.length < 3 && availableGoals.length > 0) {
+          const next = availableGoals.shift()!;
+          finalTasks.push({ id: next.id, text: lang === 'en' ? next.en : next.es, category: next.category });
+        }
+      }
+      
+      const newGoals = finalTasks.map((selection: any, idx: number) => {
         const baseGoal = GOAL_BANK.find(g => g.id === selection.id) || GOAL_BANK[0];
         const xValue = xFactors[selection.id];
         return { 
@@ -829,9 +864,11 @@ export const App: React.FC = () => {
         });
       }
       
-      const regularTasks = GOAL_BANK.slice(0, 3);
+      // Pick diverse fallback tasks: 1 Walking + 1 Recovery + 1 Hydration (safe for any energy level)
+      const walkingTask = GOAL_BANK.find(g => g.category === 'Walking') || GOAL_BANK[15];
       const recoveryTask = GOAL_BANK.find(g => g.category === 'Recovery') || GOAL_BANK[35];
-      const fallbackTasks = [...regularTasks, recoveryTask].map((g, i) => ({
+      const hydrationTask = GOAL_BANK.find(g => g.category === 'Hydration') || GOAL_BANK[43];
+      const fallbackTasks = [walkingTask, recoveryTask, hydrationTask].map((g, i) => ({
         ...g,
         type: i < 3 ? 'primary' : 'support',
         xValue: fallbackXFactors[g.id],

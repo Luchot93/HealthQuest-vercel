@@ -5,6 +5,95 @@ import { Language, ScreenId, PetType, PetMood, Goal, PetGender, RecurrenceFreque
 import { UI_STRINGS, PET_STYLES, GOAL_BANK, FEEDBACK_MESSAGES } from './constants';
 // Claude API used instead of Gemini
 
+// --- X Factor Calculation Functions ---
+interface XFactorParams {
+  consistency: 'Beginner' | 'Regular' | 'Active';
+  previousDayStatus: 'All completed' | 'Partial' | 'None';
+  goalBaseValue: number; // The baseValue from GOAL_BANK for this specific challenge
+}
+
+const calculateXFactor = (categoryId: number, params: XFactorParams): number | string => {
+  const { consistency, previousDayStatus, goalBaseValue } = params;
+  
+  // Consistency multipliers - adjusts the goal's baseValue based on user level
+  const consistencyMultipliers = {
+    Beginner: 0.6,  // 60% of baseValue for beginners
+    Regular:  1.0,  // 100% of baseValue for regular users
+    Active:   1.3   // 130% of baseValue for active users
+  };
+  
+  // Map challenge ID to category for progression logic
+  const getCategory = (id: number): string => {
+    if (id >= 1  && id <= 15) return 'running';
+    if (id >= 16 && id <= 25) return 'walking';
+    if (id >= 26 && id <= 35) return 'warmup';
+    if (id >= 36 && id <= 43) return 'recovery';
+    if (id >= 44 && id <= 50) return 'hydration';
+    return 'other';
+  };
+  
+  const category = getCategory(categoryId);
+  
+  // Start with the goal's baseValue adjusted for consistency
+  let value = goalBaseValue * consistencyMultipliers[consistency];
+  
+  // Progression / regression based on previous day completion:
+  // All completed  → increase difficulty (+10% for Beginner/Regular, +15% for Active)
+  // Partial        → hold same difficulty (no change)
+  // None           → reduce difficulty (running -20%, walking -10%)
+  if (previousDayStatus === 'All completed') {
+    const multiplier = consistency === 'Active' ? 1.15 : 1.10;
+    value = value * multiplier;
+  } else if (previousDayStatus === 'None') {
+    if (category === 'running') {
+      value = value * 0.80; // 20% regression
+    } else if (category === 'walking') {
+      value = value * 0.90; // 10% regression
+    }
+  }
+  // 'Partial' → no change (hold difficulty)
+
+  // Round to meaningful increments based on category and value type
+  if (category === 'running' && goalBaseValue <= 10) {
+    // Distance in km - round to nearest 0.5
+    value = Math.round(value * 2) / 2;
+    value = Math.max(1, value); // Minimum 1km
+  } else if (category === 'walking') {
+    if (categoryId === 17) {
+      // Steps - round to nearest 500
+      value = Math.round(value / 500) * 500;
+      value = Math.max(2000, value); // Minimum 2000 steps
+    } else {
+      // Minutes - round to nearest 5
+      value = Math.round(value / 5) * 5;
+      value = Math.max(5, value); // Minimum 5 minutes
+    }
+  } else if (category === 'hydration') {
+    if (goalBaseValue >= 100) {
+      // Milliliters - round to nearest 50
+      value = Math.round(value / 50) * 50;
+      value = Math.max(200, value);
+    } else if (goalBaseValue >= 5) {
+      // Glasses - round to nearest 1
+      value = Math.round(value);
+      value = Math.max(4, value);
+    } else {
+      // Liters - round to 1 decimal
+      value = Math.round(value * 10) / 10;
+      value = Math.max(1, value);
+    }
+  } else if (category === 'recovery' || category === 'warmup') {
+    // Minutes - round to nearest 5
+    value = Math.round(value / 5) * 5;
+    value = Math.max(5, value);
+  } else {
+    // Default: round to nearest whole number
+    value = Math.round(value);
+  }
+  
+  return value;
+};
+
 // --- Types for Shop ---
 interface ShopItem {
   id: string;
@@ -633,6 +722,24 @@ export const App: React.FC = () => {
         ? (previousDayStats.completedIds.length === previousDayStats.tasks.length ? 'All completed' : previousDayStats.completedIds.length > 0 ? 'Partial' : 'None') 
         : 'None';
 
+      // Calculate X factors for each challenge ID using its baseValue from GOAL_BANK
+      const xFactors: Record<number, number | string> = {};
+      GOAL_BANK.forEach(goal => {
+        xFactors[goal.id] = calculateXFactor(goal.id, {
+          consistency,
+          previousDayStatus: prevStatus,
+          goalBaseValue: goal.baseValue
+        });
+      });
+
+      // Create an enriched goal bank with pre-calculated X values
+      const enrichedGoalBank = GOAL_BANK.map(goal => ({
+        ...goal,
+        calculatedX: xFactors[goal.id],
+        en: goal.en.replace('{X}', String(xFactors[goal.id])),
+        es: goal.es.replace('{X}', String(xFactors[goal.id]))
+      }));
+
       const prompt = `
       LANGUAGE RULE:
       If the user selected Spanish (lang: 'es'), respond ENTIRELY in Spanish — all task names, pet dialogue, and copy. 
@@ -649,22 +756,16 @@ export const App: React.FC = () => {
       5. PREVIOUS DAY completion status: ${prevStatus}
       6. PREVIOUS TASKS: ${previousDayStats ? JSON.stringify(previousDayStats.tasks.map(t => ({ text: lang === 'en' ? t.en : t.es, completed: previousDayStats.completedIds.includes(t.id) }))) : 'None'}
 
+      IMPORTANT NOTE:
+      The X values have been PRE-CALCULATED based on the user's consistency level and previous day completion status.
+      All completed → difficulty increased. Partial → same difficulty. None → difficulty reduced.
+      The challenge bank below contains the EXACT challenges to suggest with X values already filled in.
+      DO NOT recalculate or change these X values - they are personalized and correct.
+
       BASELINE BY CONSISTENCY LEVEL:
       - BEGINNER (1-2x per week): Jog 1-2km, Walk 10-15 min. Max 3km.
       - REGULAR (3-4x per week): Jog 3-4km, Walk 20-25 min.
       - ACTIVE (5-7x per week): Jog 5km+, Walk 30 min. Progression multiplier is 15%.
-
-      PROGRESSION RULES:
-      - JOGGING: Completed -> +10% distance (Active: +15%), round to nearest 0.5km. Missed -> -20% distance, min 1km.
-      - WALKING: Completed -> +5 min, max 60 min. Missed -> -5 min, min 5 min.
-      - FULL DAY COMPLETED: Apply progression to all tasks.
-      - PARTIAL DAY (2-4 tasks): Hold same difficulty.
-      - ZERO TASKS: Apply regression, remove jogging from next day entirely.
-      - STREAK: If streak is 3+, increase distance by 15% (Active: 20%).
-
-      CHALLENGE FORMAT RULE:
-      Every challenge must be written in this format: "Let's [action] [specific target] today"
-      The target must always be specific (number, distance, time, or count).
 
       TASK SELECTION MATRIX:
       - ALWAYS suggest 3 to 4 tasks in total.
@@ -676,29 +777,38 @@ export const App: React.FC = () => {
 
       HARD RULES:
       - ALWAYS include exactly 3 or 4 tasks.
-      - ALWAYS include at least one task from the 'Recovery' category.
-      - NEVER suggest running to Stressed users or if energy is 1-2.
-      - Minimum values: 1km for jogging, 5 min for walking, 1 liter for hydration.
+      - EVERY TASK MUST HAVE A UNIQUE ID - NEVER repeat the same challenge ID twice.
+      - ALWAYS include at least one task from the 'Recovery' category (IDs 36-43).
+      - NEVER suggest running (IDs 1-15) to Stressed users.
+      - NEVER suggest running (IDs 1-15) if energy is 1-2, regardless of mood.
+      - NEVER suggest running (IDs 1-15) if previous day status is 'None'.
+      - For Stressed or Low Energy: Pick from Walking (16-25), Warm-up/Cool-down (26-35), Recovery (36-43), Hydration (44-50) ONLY.
       - Always frame challenges positively.
-      - If tasks were missed yesterday, say: "Yesterday didn't go as planned, but today is a new chance." (or Spanish equivalent).
+      - Use the challenge text AS-IS from the bank below - do not modify the X values.
+      - DIVERSIFY: Pick challenges from different categories when possible (e.g., 1 Walking + 1 Recovery + 1 Hydration).
 
       PET DIALOGUE BY MOOD:
-      - Energetic: "I feel great! Let's go!" / "¡Me siento genial! ¡Vamos!"
-      - Calm: "A steady day ahead of us." / "Un día tranquilo por delante."
-      - Tired: "Let's take it slow today." / "Vamos con calma hoy."
-      - Stressed: "Breathe. We've got this." / "Respira. Podemos con esto."
-      - Energy 1-2: "Rest is part of the work." / "El descanso es parte del trabajo."
-      - Full Completion Celebration: "You did it all! I'm so proud of us!" / "¡Lo lograste todo! ¡Estoy muy orgulloso de nosotros!"
+      - Energetic: "You've got great energy today. Let's make the most of it together."
+      - Calm: "Today feels steady. A good pace is all you need."
+      - Tired: "Your body needs care today. Let's keep it gentle."
+      - Stressed: "No pressure today. Just a little movement and some rest."
+      - Energy 1-2: "Rest is progress too. Take care of yourself today."
+      - Full Completion Celebration: "You showed up and gave everything today. That is what it is all about."
 
-      CHALLENGE BANK (IDs 1-50):
-      ${JSON.stringify(GOAL_BANK)}
+      CHALLENGE BANK (IDs 1-50) - X values are pre-calculated:
+      ${JSON.stringify(enrichedGoalBank.map(g => ({
+        id: g.id,
+        category: g.category,
+        en: g.en,
+        es: g.es
+      })))}
 
       Return JSON ONLY with no markdown, no backticks, no explanation:
       {
         "tasks": [
           {
             "id": number (1-50),
-            "text": "string (The full challenge text in the correct language)",
+            "text": "string (Use EXACTLY as provided in the challenge bank)",
             "category": "string"
           }
         ],
@@ -722,13 +832,47 @@ export const App: React.FC = () => {
       const selectedTasks = result.tasks || [];
       setPetSpeech(result.petDialogue || null);
       
-      const newGoals = selectedTasks.map((selection: any, idx: number) => {
+      // Deduplicate tasks by ID (safety net in case AI returns duplicates)
+      const seenIds = new Set<number>();
+      const uniqueTasks = selectedTasks.filter((task: any) => {
+        if (seenIds.has(task.id)) return false;
+        seenIds.add(task.id);
+        return true;
+      });
+
+      // If we have duplicates removed and need more tasks, fill from appropriate categories
+      let finalTasks = uniqueTasks;
+      if (uniqueTasks.length < 3) {
+        const usedIds = new Set(uniqueTasks.map((t: any) => t.id));
+        // For low energy/stressed, only pick from non-running categories
+        const isLowEnergy = userEnergy <= 2 || userMoodSelection === 'Stressed';
+        const availableGoals = enrichedGoalBank.filter(g => {
+          if (usedIds.has(g.id)) return false;
+          if (isLowEnergy && g.category === 'Running') return false;
+          return true;
+        });
+        // Prioritize Recovery, then Walking, then Hydration
+        const priorityOrder = ['Recovery', 'Walking', 'Hydration', 'Cool-down', 'Warm-up'];
+        availableGoals.sort((a, b) => {
+          const aIdx = priorityOrder.indexOf(a.category);
+          const bIdx = priorityOrder.indexOf(b.category);
+          return (aIdx === -1 ? 99 : aIdx) - (bIdx === -1 ? 99 : bIdx);
+        });
+        while (finalTasks.length < 3 && availableGoals.length > 0) {
+          const next = availableGoals.shift()!;
+          finalTasks.push({ id: next.id, text: lang === 'en' ? next.en : next.es, category: next.category });
+        }
+      }
+      
+      const newGoals = finalTasks.map((selection: any, idx: number) => {
         const baseGoal = GOAL_BANK.find(g => g.id === selection.id) || GOAL_BANK[0];
+        const xValue = xFactors[selection.id];
         return { 
           ...baseGoal, 
           type: idx < 3 ? 'primary' : 'support', 
-          en: lang === 'en' ? selection.text : baseGoal.en,
-          es: lang === 'es' ? selection.text : baseGoal.es,
+          xValue: xValue,
+          en: lang === 'en' ? selection.text : baseGoal.en.replace('{X}', String(xValue)),
+          es: lang === 'es' ? selection.text : baseGoal.es.replace('{X}', String(xValue)),
           category: selection.category || baseGoal.category
         };
       });
@@ -737,11 +881,29 @@ export const App: React.FC = () => {
       setCompletedGoalIds([]);
       setTimeout(() => navigateTo('MOTIVATION'), 1500);
     } catch (e) {
-      console.error("Error generating quests:", e);
-      // Fallback: 3 regular tasks + 1 recovery task
-      const regularTasks = GOAL_BANK.slice(0, 3);
+      console.error("[v0] Error generating quests:", e);
+      // Fallback: 3 regular tasks + 1 recovery task with basic X values
+      const consistency = userActivitySelection === 'level3' ? 'Active' : userActivitySelection === 'level2' ? 'Regular' : 'Beginner';
+      const fallbackXFactors: Record<number, number | string> = {};
+      GOAL_BANK.forEach(goal => {
+        fallbackXFactors[goal.id] = calculateXFactor(goal.id, {
+          consistency,
+          previousDayStatus: 'Partial',
+          goalBaseValue: goal.baseValue
+        });
+      });
+      
+      // Pick diverse fallback tasks: 1 Walking + 1 Recovery + 1 Hydration (safe for any energy level)
+      const walkingTask = GOAL_BANK.find(g => g.category === 'Walking') || GOAL_BANK[15];
       const recoveryTask = GOAL_BANK.find(g => g.category === 'Recovery') || GOAL_BANK[35];
-      const fallbackTasks = [...regularTasks, recoveryTask].map((g, i) => ({ ...g, type: i < 3 ? 'primary' : 'support' }));
+      const hydrationTask = GOAL_BANK.find(g => g.category === 'Hydration') || GOAL_BANK[43];
+      const fallbackTasks = [walkingTask, recoveryTask, hydrationTask].map((g, i) => ({
+        ...g,
+        type: i < 3 ? 'primary' : 'support',
+        xValue: fallbackXFactors[g.id],
+        en: g.en.replace('{X}', String(fallbackXFactors[g.id])),
+        es: g.es.replace('{X}', String(fallbackXFactors[g.id]))
+      }));
       setDailyGoals(fallbackTasks);
       setHiddenGoalIds([]);
       setCompletedGoalIds([]);
@@ -787,27 +949,21 @@ export const App: React.FC = () => {
 
   const libraryGoals = useMemo(() => {
     const filtered = GOAL_BANK.filter(g => g.category === libraryActiveCategory);
-    // Rough scaling logic based on energy
-    const energyMult = userEnergy / 3; // 0.33 to 1.66
+    // Use energy to determine consistency-like scaling (1-2: Beginner, 3: Regular, 4-5: Active)
+    const consistency = userEnergy >= 4 ? 'Active' : userEnergy >= 3 ? 'Regular' : 'Beginner';
     
     return filtered.map(g => {
-        let xVal = g.baseValue ? Math.round(g.baseValue * energyMult) : undefined;
-        let yVal = undefined;
-
-        // Specialized scaling for the new categories
-        if (g.category === 'Running') {
-            xVal = Math.max(1, Math.round((g.baseValue || 2) * energyMult)); // km
-        } else if (g.category === 'Walking') {
-            xVal = Math.max(1000, Math.round((g.baseValue || 3000) * energyMult)); // steps
-            xVal = Math.round(xVal / 500) * 500; // Round to nearest 500
-        } else if (g.category === 'Warm-up' || g.category === 'Cool-down' || g.category === 'Recovery' || g.category === 'Hydration') {
-            xVal = g.baseValue; // Keep base values for these
-        }
+        // Use calculateXFactor for consistent values across the app
+        const xVal = calculateXFactor(g.id, {
+            consistency,
+            previousDayStatus: 'Partial', // Neutral for library browsing
+            goalBaseValue: g.baseValue
+        });
 
         return {
             ...g,
             xValue: xVal,
-            yValue: yVal
+            yValue: undefined
         };
     });
   }, [libraryActiveCategory, userEnergy]);

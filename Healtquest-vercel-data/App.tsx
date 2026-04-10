@@ -9,22 +9,21 @@ import { UI_STRINGS, PET_STYLES, GOAL_BANK, FEEDBACK_MESSAGES } from './constant
 interface XFactorParams {
   consistency: 'Beginner' | 'Regular' | 'Active';
   previousDayStatus: 'All completed' | 'Partial' | 'None';
-  streak: number;
 }
 
 const calculateXFactor = (categoryId: number, params: XFactorParams): number | string => {
-  const { consistency, previousDayStatus, streak } = params;
+  const { consistency, previousDayStatus } = params;
   
-  // Baseline values by consistency
+  // Baseline values by consistency level (first day / no history)
   const baselines = {
     Beginner: { running: 1.5, walking: 10, warmup: 5, cooldown: 5, recovery: 15, hydration: 2 },
-    Regular: { running: 3.5, walking: 20, warmup: 5, cooldown: 5, recovery: 15, hydration: 2 },
-    Active: { running: 5, walking: 30, warmup: 5, cooldown: 5, recovery: 15, hydration: 2 }
+    Regular:  { running: 3.5, walking: 20, warmup: 5, cooldown: 5, recovery: 15, hydration: 2 },
+    Active:   { running: 5,   walking: 30, warmup: 5, cooldown: 5, recovery: 15, hydration: 2 }
   };
   
-  // Determine category for the challenge ID
+  // Map challenge ID to category
   const getCategory = (id: number): string => {
-    if (id >= 1 && id <= 15) return 'running';
+    if (id >= 1  && id <= 15) return 'running';
     if (id >= 16 && id <= 25) return 'walking';
     if (id >= 26 && id <= 35) return (id <= 28 || id === 33 || id === 34) ? 'warmup' : 'cooldown';
     if (id >= 36 && id <= 43) return 'recovery';
@@ -35,38 +34,35 @@ const calculateXFactor = (categoryId: number, params: XFactorParams): number | s
   const category = getCategory(categoryId);
   let baseValue = baselines[consistency][category as keyof typeof baselines[typeof consistency]];
   
-  // Apply progression or regression based on previous day
+  // Progression / regression based purely on previous day completion:
+  // All completed  → increase difficulty (10% for Beginner/Regular, 15% for Active)
+  // Partial        → hold same difficulty (no change)
+  // None           → reduce difficulty (running regresses 20%, walking drops 5 min)
   if (previousDayStatus === 'All completed') {
     const multiplier = consistency === 'Active' ? 1.15 : 1.10;
     baseValue = baseValue * multiplier;
-  } else if (previousDayStatus === 'None' && category === 'running') {
-    baseValue = Math.max(1, baseValue * 0.8); // 20% regression
-  }
-  
-  // Streak bonus (3+ streak gets +15%)
-  if (streak >= 3) {
-    const streakBonus = consistency === 'Active' ? 1.20 : 1.15;
-    baseValue = baseValue * streakBonus;
-  }
-  
-  // Round appropriately
-  if (category === 'running' || category === 'walking') {
-    // Running: round to nearest 0.5km
+  } else if (previousDayStatus === 'None') {
     if (category === 'running') {
-      baseValue = Math.round(baseValue * 2) / 2;
-    }
-    // Walking: round to nearest 5 minutes
-    if (category === 'walking') {
-      baseValue = Math.round(baseValue / 5) * 5;
+      baseValue = baseValue * 0.80; // 20% regression
+    } else if (category === 'walking') {
+      baseValue = baseValue - 5; // subtract 5 min
     }
   }
+  // 'Partial' → no change (hold difficulty)
+
+  // Round to meaningful increments
+  if (category === 'running') {
+    baseValue = Math.round(baseValue * 2) / 2; // nearest 0.5 km
+  } else if (category === 'walking') {
+    baseValue = Math.round(baseValue / 5) * 5; // nearest 5 min
+  }
   
-  // Apply minimums
+  // Enforce minimums
   if (category === 'running') baseValue = Math.max(1, baseValue);
   if (category === 'walking') baseValue = Math.max(5, baseValue);
   
-  // Special case for steps
-  if (categoryId === 17) return Math.round(baseValue * 1000); // Convert to steps
+  // Steps challenge (ID 17) uses a step count instead of minutes
+  if (categoryId === 17) return Math.round(baseValue * 1000);
   
   return baseValue;
 };
@@ -704,8 +700,7 @@ export const App: React.FC = () => {
       for (let i = 1; i <= 50; i++) {
         xFactors[i] = calculateXFactor(i, {
           consistency,
-          previousDayStatus: prevStatus,
-          streak: streak || 0
+          previousDayStatus: prevStatus
         });
       }
 
@@ -731,11 +726,11 @@ export const App: React.FC = () => {
       3. ENERGY: ${userEnergy} (1-5 scale)
       4. TIME: ${userTimeInvestment}
       5. PREVIOUS DAY completion status: ${prevStatus}
-      6. STREAK: ${streak || 0}
-      7. PREVIOUS TASKS: ${previousDayStats ? JSON.stringify(previousDayStats.tasks.map(t => ({ text: lang === 'en' ? t.en : t.es, completed: previousDayStats.completedIds.includes(t.id) }))) : 'None'}
+      6. PREVIOUS TASKS: ${previousDayStats ? JSON.stringify(previousDayStats.tasks.map(t => ({ text: lang === 'en' ? t.en : t.es, completed: previousDayStats.completedIds.includes(t.id) }))) : 'None'}
 
       IMPORTANT NOTE:
-      The X values have been PRE-CALCULATED based on the user's consistency level, previous day performance, and streak.
+      The X values have been PRE-CALCULATED based on the user's consistency level and previous day completion status.
+      All completed → difficulty increased. Partial → same difficulty. None → difficulty reduced.
       The challenge bank below contains the EXACT challenges to suggest with X values already filled in.
       DO NOT recalculate or change these X values - they are personalized and correct.
 
@@ -830,8 +825,7 @@ export const App: React.FC = () => {
       for (let i = 1; i <= 50; i++) {
         fallbackXFactors[i] = calculateXFactor(i, {
           consistency,
-          previousDayStatus: 'Partial',
-          streak: streak || 0
+          previousDayStatus: 'Partial'
         });
       }
       

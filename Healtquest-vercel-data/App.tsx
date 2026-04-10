@@ -9,62 +9,89 @@ import { UI_STRINGS, PET_STYLES, GOAL_BANK, FEEDBACK_MESSAGES } from './constant
 interface XFactorParams {
   consistency: 'Beginner' | 'Regular' | 'Active';
   previousDayStatus: 'All completed' | 'Partial' | 'None';
+  goalBaseValue: number; // The baseValue from GOAL_BANK for this specific challenge
 }
 
 const calculateXFactor = (categoryId: number, params: XFactorParams): number | string => {
-  const { consistency, previousDayStatus } = params;
+  const { consistency, previousDayStatus, goalBaseValue } = params;
   
-  // Baseline values by consistency level (first day / no history)
-  const baselines = {
-    Beginner: { running: 1.5, walking: 10, warmup: 5, cooldown: 5, recovery: 15, hydration: 2 },
-    Regular:  { running: 3.5, walking: 20, warmup: 5, cooldown: 5, recovery: 15, hydration: 2 },
-    Active:   { running: 5,   walking: 30, warmup: 5, cooldown: 5, recovery: 15, hydration: 2 }
+  // Consistency multipliers - adjusts the goal's baseValue based on user level
+  const consistencyMultipliers = {
+    Beginner: 0.6,  // 60% of baseValue for beginners
+    Regular:  1.0,  // 100% of baseValue for regular users
+    Active:   1.3   // 130% of baseValue for active users
   };
   
-  // Map challenge ID to category
+  // Map challenge ID to category for progression logic
   const getCategory = (id: number): string => {
     if (id >= 1  && id <= 15) return 'running';
     if (id >= 16 && id <= 25) return 'walking';
-    if (id >= 26 && id <= 35) return (id <= 28 || id === 33 || id === 34) ? 'warmup' : 'cooldown';
+    if (id >= 26 && id <= 35) return 'warmup';
     if (id >= 36 && id <= 43) return 'recovery';
     if (id >= 44 && id <= 50) return 'hydration';
-    return 'walking';
+    return 'other';
   };
   
   const category = getCategory(categoryId);
-  let baseValue = baselines[consistency][category as keyof typeof baselines[typeof consistency]];
   
-  // Progression / regression based purely on previous day completion:
-  // All completed  → increase difficulty (10% for Beginner/Regular, 15% for Active)
+  // Start with the goal's baseValue adjusted for consistency
+  let value = goalBaseValue * consistencyMultipliers[consistency];
+  
+  // Progression / regression based on previous day completion:
+  // All completed  → increase difficulty (+10% for Beginner/Regular, +15% for Active)
   // Partial        → hold same difficulty (no change)
-  // None           → reduce difficulty (running regresses 20%, walking drops 5 min)
+  // None           → reduce difficulty (running -20%, walking -10%)
   if (previousDayStatus === 'All completed') {
     const multiplier = consistency === 'Active' ? 1.15 : 1.10;
-    baseValue = baseValue * multiplier;
+    value = value * multiplier;
   } else if (previousDayStatus === 'None') {
     if (category === 'running') {
-      baseValue = baseValue * 0.80; // 20% regression
+      value = value * 0.80; // 20% regression
     } else if (category === 'walking') {
-      baseValue = baseValue - 5; // subtract 5 min
+      value = value * 0.90; // 10% regression
     }
   }
   // 'Partial' → no change (hold difficulty)
 
-  // Round to meaningful increments
-  if (category === 'running') {
-    baseValue = Math.round(baseValue * 2) / 2; // nearest 0.5 km
+  // Round to meaningful increments based on category and value type
+  if (category === 'running' && goalBaseValue <= 10) {
+    // Distance in km - round to nearest 0.5
+    value = Math.round(value * 2) / 2;
+    value = Math.max(1, value); // Minimum 1km
   } else if (category === 'walking') {
-    baseValue = Math.round(baseValue / 5) * 5; // nearest 5 min
+    if (categoryId === 17) {
+      // Steps - round to nearest 500
+      value = Math.round(value / 500) * 500;
+      value = Math.max(2000, value); // Minimum 2000 steps
+    } else {
+      // Minutes - round to nearest 5
+      value = Math.round(value / 5) * 5;
+      value = Math.max(5, value); // Minimum 5 minutes
+    }
+  } else if (category === 'hydration') {
+    if (goalBaseValue >= 100) {
+      // Milliliters - round to nearest 50
+      value = Math.round(value / 50) * 50;
+      value = Math.max(200, value);
+    } else if (goalBaseValue >= 5) {
+      // Glasses - round to nearest 1
+      value = Math.round(value);
+      value = Math.max(4, value);
+    } else {
+      // Liters - round to 1 decimal
+      value = Math.round(value * 10) / 10;
+      value = Math.max(1, value);
+    }
+  } else if (category === 'recovery' || category === 'warmup') {
+    // Minutes - round to nearest 5
+    value = Math.round(value / 5) * 5;
+    value = Math.max(5, value);
+  } else {
+    // Default: round to nearest whole number
+    value = Math.round(value);
   }
   
-  // Enforce minimums
-  if (category === 'running') baseValue = Math.max(1, baseValue);
-  if (category === 'walking') baseValue = Math.max(5, baseValue);
-  
-  // Steps challenge (ID 17) uses a step count instead of minutes
-  if (categoryId === 17) return Math.round(baseValue * 1000);
-  
-  return baseValue;
+  return value;
 };
 
 // --- Types for Shop ---
@@ -695,14 +722,15 @@ export const App: React.FC = () => {
         ? (previousDayStats.completedIds.length === previousDayStats.tasks.length ? 'All completed' : previousDayStats.completedIds.length > 0 ? 'Partial' : 'None') 
         : 'None';
 
-      // Calculate X factors for each challenge ID
+      // Calculate X factors for each challenge ID using its baseValue from GOAL_BANK
       const xFactors: Record<number, number | string> = {};
-      for (let i = 1; i <= 50; i++) {
-        xFactors[i] = calculateXFactor(i, {
+      GOAL_BANK.forEach(goal => {
+        xFactors[goal.id] = calculateXFactor(goal.id, {
           consistency,
-          previousDayStatus: prevStatus
+          previousDayStatus: prevStatus,
+          goalBaseValue: goal.baseValue
         });
-      }
+      });
 
       // Create an enriched goal bank with pre-calculated X values
       const enrichedGoalBank = GOAL_BANK.map(goal => ({
@@ -857,12 +885,13 @@ export const App: React.FC = () => {
       // Fallback: 3 regular tasks + 1 recovery task with basic X values
       const consistency = userActivitySelection === 'level3' ? 'Active' : userActivitySelection === 'level2' ? 'Regular' : 'Beginner';
       const fallbackXFactors: Record<number, number | string> = {};
-      for (let i = 1; i <= 50; i++) {
-        fallbackXFactors[i] = calculateXFactor(i, {
+      GOAL_BANK.forEach(goal => {
+        fallbackXFactors[goal.id] = calculateXFactor(goal.id, {
           consistency,
-          previousDayStatus: 'Partial'
+          previousDayStatus: 'Partial',
+          goalBaseValue: goal.baseValue
         });
-      }
+      });
       
       // Pick diverse fallback tasks: 1 Walking + 1 Recovery + 1 Hydration (safe for any energy level)
       const walkingTask = GOAL_BANK.find(g => g.category === 'Walking') || GOAL_BANK[15];
@@ -920,27 +949,21 @@ export const App: React.FC = () => {
 
   const libraryGoals = useMemo(() => {
     const filtered = GOAL_BANK.filter(g => g.category === libraryActiveCategory);
-    // Rough scaling logic based on energy
-    const energyMult = userEnergy / 3; // 0.33 to 1.66
+    // Use energy to determine consistency-like scaling (1-2: Beginner, 3: Regular, 4-5: Active)
+    const consistency = userEnergy >= 4 ? 'Active' : userEnergy >= 3 ? 'Regular' : 'Beginner';
     
     return filtered.map(g => {
-        let xVal = g.baseValue ? Math.round(g.baseValue * energyMult) : undefined;
-        let yVal = undefined;
-
-        // Specialized scaling for the new categories
-        if (g.category === 'Running') {
-            xVal = Math.max(1, Math.round((g.baseValue || 2) * energyMult)); // km
-        } else if (g.category === 'Walking') {
-            xVal = Math.max(1000, Math.round((g.baseValue || 3000) * energyMult)); // steps
-            xVal = Math.round(xVal / 500) * 500; // Round to nearest 500
-        } else if (g.category === 'Warm-up' || g.category === 'Cool-down' || g.category === 'Recovery' || g.category === 'Hydration') {
-            xVal = g.baseValue; // Keep base values for these
-        }
+        // Use calculateXFactor for consistent values across the app
+        const xVal = calculateXFactor(g.id, {
+            consistency,
+            previousDayStatus: 'Partial', // Neutral for library browsing
+            goalBaseValue: g.baseValue
+        });
 
         return {
             ...g,
             xValue: xVal,
-            yValue: yVal
+            yValue: undefined
         };
     });
   }, [libraryActiveCategory, userEnergy]);
